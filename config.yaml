@@ -1,0 +1,39 @@
+model:
+  base_model: "mistralai/Mistral-7B-v0.1"
+  quantize: false
+  use_lora: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+training:
+  learning_rate: 2.0e-4
+  num_epochs: 3
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  max_seq_length: 4096
+  warmup_ratio: 0.03
+  lr_scheduler: "cosine"
+  fp16: true
+
+indexing:
+  chunk_size: 600
+  overlap: 100
+  embeddings_model: "ollama/nomic-embed-text:latest"
+  llm_model: "ollama_chat/llama3.2:latest"
+  max_gleaning_iterations: 3
+
+dataset:
+  n_questions_per_community: 5
+  n_distractors: 3
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+evaluation:
+  judge_model: "ollama_chat/llama3.2:latest"
+  bert_score_model: "microsoft/deberta-xlarge-mnli"
+  nli_model: "cross-encoder/nli-deberta-v3-small"
