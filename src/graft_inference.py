@@ -89,16 +89,33 @@ class GRAFTInference:
                 sources.append(f"C0_{c.level}_{hash(c.title)}")
                 
         elif query_type.category in ["local", "multihop"]:
-            # Mock BM25 extraction by checking token overlap
-            q_words = set(query.lower().split())
-            best_match = None
-            max_overlap = -1
+            # Use sentence embeddings for semantic extraction
+            try:
+                from sentence_transformers import SentenceTransformer, util
+                if not hasattr(self, 'embedder'):
+                    self.embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            except ImportError:
+                self.embedder = None
             
-            for c_id, summary in community_summaries.items():
-                overlap = len(set(summary.summary.lower().split()).intersection(q_words))
-                if overlap > max_overlap:
-                    max_overlap = overlap
-                    best_match = summary
+            best_match = None
+            max_score = -1.0
+            
+            if self.embedder is not None:
+                q_emb = self.embedder.encode(query, convert_to_tensor=True)
+                for c_id, summary in community_summaries.items():
+                    c_emb = self.embedder.encode(summary.summary, convert_to_tensor=True)
+                    score = util.cos_sim(q_emb, c_emb).item()
+                    if score > max_score:
+                        max_score = score
+                        best_match = summary
+            else:
+                # Fallback to token overlap if sentence-transformers not found
+                q_words = set(query.lower().split())
+                for c_id, summary in community_summaries.items():
+                    overlap = len(set(summary.summary.lower().split()).intersection(q_words))
+                    if overlap > max_score:
+                        max_score = overlap
+                        best_match = summary
                     
             if best_match:
                 docs.append(f"Title: {best_match.title}\n{best_match.summary}")
@@ -120,6 +137,22 @@ class GRAFTInference:
 
     def generate_answer(self, query: str, context: Context) -> GRAFTAnswer:
         """Generates the grounded CoT answer using the loaded fine-tuned model."""
+        # If no fine-tuned model loaded, fall back to base LLM
+        if self.model is None or self.tokenizer is None:
+            ctx_text = "\n".join(context.documents)
+            prompt = (
+                f"Answer this question using the context below.\n"
+                f"Question: {query}\n\nContext:\n{ctx_text}\n\n"
+                f"Think step by step then give your answer."
+            )
+            response = self.base_llm.generate(prompt=prompt)
+            return GRAFTAnswer(
+                relevant_docs=context.source_ids,
+                reasoning_chain="Answered via base LLM fallback.",
+                final_answer=response,
+                citations=context.source_ids[:2]
+            )
+
         input_text = "Context Documents:\n"
         for idx, doc in enumerate(context.documents):
             source_id = context.source_ids[idx]

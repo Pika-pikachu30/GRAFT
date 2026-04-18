@@ -11,7 +11,11 @@ from transformers import (
     BitsAndBytesConfig,
     TrainingArguments
 )
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
+from trl import SFTTrainer
+try:
+    from trl import DataCollatorForCompletionOnlyLM
+except ImportError:
+    from trl.trainer.utils import DataCollatorForCompletionOnlyLM
 from utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -159,8 +163,12 @@ class GRAFTTrainer:
             raise ValueError("Trainer not set up. Call `setup_trainer()` first.")
         logger.info("Starting training...")
         self.trainer.train()
-        logger.info("Training finished. Saving last checkpoint.")
-        self.trainer.save_model(os.path.join(self.config.output_dir, "final_checkpoint"))
+        
+        # Save the LoRA adapter directly (faster than full merge)
+        final_path = os.path.join(self.config.output_dir, "final_checkpoint")
+        self.trainer.save_model(final_path)
+        self.tokenizer.save_pretrained(final_path)   # ← add this line
+        logger.info(f"Training finished. Saved to {final_path}")
 
     def evaluate_checkpoint(self, checkpoint_path: str, eval_dataset_path: str):
         """Evaluates a checkpoint on a held-out set, returning perplexity."""

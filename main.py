@@ -45,7 +45,7 @@ def index(corpus: str = typer.Option("data/raw/", help="Path to input corpus"),
     
     with console.status("[bold blue]Extracting Entities and Relations (LLM calling)...", spinner="dots"):
         # In a real run, this operates on chunks. For demo CLI speed we take top 5.
-        graph = indexer.extract_entities_and_relations(chunks[:5], max_glean_iterations=1)
+        graph = indexer.extract_entities_and_relations(chunks[:20], max_glean_iterations=1)
         
     with console.status("[bold blue]Detecting Communities and Summarizing...", spinner="dots"):
         hierarchy = indexer.detect_communities(graph)
@@ -105,53 +105,117 @@ def build_dataset(index_dir: str = typer.Option("data/graph_index/", help="Path 
 
 
 @app.command()
-def train(dataset: str = typer.Option("data/processed/", help="Path to RAFT dataset"),
-          config: str = typer.Option("config.yaml", help="Path to hyperparameters")):
+def train(dataset: str = typer.Option("data/processed/"),
+          config: str = typer.Option("config.yaml")):
     """Step 3: Fine-tune the base LLM on the RAFT dataset."""
     console.print(f"[bold green]Initializing GRAFT Trainer...[/bold green]")
-    
+
     if not os.path.exists(dataset):
         typer.echo(f"Dataset path {dataset} not found. Run 'build-dataset' first.")
         raise typer.Exit(code=1)
-        
+
     trainer = GRAFTTrainer(config_path=config)
-    
+
     try:
-        with console.status("[bold blue]Setting up model and loading dataset...", spinner="dots"):
+        with console.status("[bold blue]Setting up model...", spinner="dots"):
             trainer.setup_model()
             trainer.setup_trainer(dataset)
-            
-        console.print("[bold blue]Training started. Check tensorboard/wandb for metrics...[/bold blue]")
-        # In a real environment, this blocks for hours:
-        # trainer.train()
-        
-        console.print("[yellow]Notice: Skipped full training loop in CLI mock run to avoid GPU locking.[/yellow]")
-        
+
+        console.print("[bold blue]Training started...[/bold blue]")
+        trainer.train()                                    # ← uncommented
+
         with console.status("[bold blue]Merging LoRA weights...", spinner="line"):
-            # trainer.export_merged_model("models/final/")
-            pass
-            
-        console.print(f"[bold green]✓ Training pipeline executed.[/bold green]")
+            trainer.export_merged_model("models/final/")  # ← uncommented
+
+        console.print(f"[bold green]✓ Training complete. Model saved to models/final/[/bold green]")
     except Exception as e:
-        console.print(f"[bold red]Training Failed:[/bold red] Requires GPU hardware and HuggingFace cache. {e}")
+        console.print(f"[bold red]Training Failed:[/bold red] {e}")
+        raise
 
 
 @app.command()
-def evaluate(model_dir: str = typer.Option("models/final/", help="Path to fine-tuned model"),
-             dataset: str = typer.Option("hotpotqa", help="Evaluation dataset split")):
-    """Step 4: Run comprehensive evaluation metrics across multiple systems."""
-    console.print(f"[bold green]Starting Evaluation Suite on {dataset}...[/bold green]")
+def evaluate(model_dir: str = typer.Option("models/final/"),
+             dataset: str = typer.Option("hotpotqa")):
+    """Step 4: Evaluate the TRAINED model on real test data."""
+    import json
+    console.print(f"[bold green]Starting Evaluation...[/bold green]")
+
+    # Load test samples
+    test_file = "data/processed/test.jsonl"
+    if not os.path.exists(test_file):
+        console.print("[red]test.jsonl not found. Run build-dataset first.[/red]")
+        raise typer.Exit(code=1)
+
+    test_samples = []
+    with open(test_file) as f:
+        for line in f:
+            if line.strip():
+                test_samples.append(json.loads(line))
+    console.print(f"Loaded {len(test_samples)} test samples.")
+
+    # Load graph + model
+    indexer = GraphIndexer()
+    indexer.load_index("data/graph_index/")
+    engine = GRAFTInference()
+
+    if os.path.exists(model_dir) and os.listdir(model_dir):
+        try:
+            engine.load_model(model_dir, quantize=False)
+            console.print(f"[green]✓ Loaded trained model from {model_dir}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Model load failed: {e} — using Ollama fallback[/yellow]")
+    else:
+        console.print("[yellow]No trained model found — using Ollama fallback[/yellow]")
+
+    # Generate answers from real model
+    questions, answers, contexts, ground_truths = [], [], [], []
+    for i, sample in enumerate(test_samples):
+        try:
+            q   = sample.get("instruction", "").split("Question:")[-1].strip()
+            gt  = sample.get("output", "")
+            ctx_text = sample.get("input", "")
+
+            if not q:
+                continue
+
+            q_type = engine.classify_query(q)
+            ctx = engine.retrieve_context(q, indexer.community_summaries, indexer.graph, q_type)
+            ans = engine.generate_answer(q, ctx)
+
+            questions.append(q)
+            answers.append(ans.final_answer)
+            contexts.append([ctx_text if ctx_text else "No context"])
+            ground_truths.append(gt)
+            console.print(f"  [{i+1}/{len(test_samples)}] {q[:60]}...")
+        except Exception as e:
+            console.print(f"[yellow]Sample {i+1} skipped: {e}[/yellow]")
+
+    if not answers:
+        console.print("[red]No answers generated.[/red]")
+        raise typer.Exit(code=1)
+
     evaluator = Evaluator(output_dir="results")
-    
-    with console.status("[bold blue]Computing NLP and RAGAS metrics...", spinner="dots"):
-        # Mock eval running for 5 seconds
-        import time; time.sleep(3)
-        res = evaluator.ragas_faithfulness_grounding({
-            "questions": ["Mock"], "answers": ["Mock"], "contexts": [["Mock ctx"]], "ground_truths": ["Mock gt"]
+
+    # ROUGE + BERTScore
+    try:
+        nlp = evaluator.standard_nlp_metrics(answers, ground_truths)
+        evaluator.save_results("GRAFT", nlp)
+        console.print(f"  ROUGE-1: {nlp['ROUGE-1']:.4f} | ROUGE-L: {nlp['ROUGE-L']:.4f} | BERTScore: {nlp['BERTScore-F1']:.4f}")
+    except Exception as e:
+        console.print(f"[yellow]NLP metrics failed: {e}[/yellow]")
+
+    # RAGAS
+    try:
+        ragas = evaluator.ragas_faithfulness_grounding({
+            "questions": questions, "answers": answers,
+            "contexts": contexts, "ground_truths": ground_truths
         })
-        
-    evaluator.save_results("GRAFT", res)
-    console.print(f"[bold green]✓ Evaluation computed and saved to results/metrics.json[/bold green]")
+        evaluator.save_results("GRAFT", ragas)
+        console.print(f"  Faithfulness: {ragas['Faithfulness']:.4f} | Relevancy: {ragas['Answer_Relevancy']:.4f}")
+    except Exception as e:
+        console.print(f"[yellow]RAGAS failed: {e}[/yellow]")
+
+    console.print(f"[bold green]✓ Evaluation saved to results/metrics.json[/bold green]")
 
 
 @app.command()
