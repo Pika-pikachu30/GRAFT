@@ -153,13 +153,4 @@ python main.py query --model models/final/ --index data/graph_index/ "What are t
 
 ---
 
-## 10. Citation
 
-```bibtex
-@article{graft2026,
-  title={GRAFT: Graph Retrieval Augmented Fine-Tuning for Comprehensive Sensemaking},
-  author={Anonymous AI Researcher},
-  journal={arXiv preprint},
-  year={2026}
-}
-```
